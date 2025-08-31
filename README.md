@@ -2,6 +2,9 @@
 
 A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader) mod for [Resonite](https://resonite.com/).
 
+Want to see you Resonite logs ingame for some reason?
+Then here ya go..
+
 
 ## Installation
 
