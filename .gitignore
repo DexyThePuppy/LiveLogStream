@@ -398,3 +398,10 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/References
+/Renderite.Shared
+/Resonance-main
+/.idea
+/EsnyaResoniteModTemplate
+/LiveLogStream
+/.github
