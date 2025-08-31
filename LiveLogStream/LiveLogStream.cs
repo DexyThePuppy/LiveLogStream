@@ -18,7 +18,7 @@ public class LiveLogMod : ResoniteMod
 {
     public override string Name => "LiveLogStream";
     public override string Author => "Dexy";
-    public override string Version => "1.0.0";
+    public override string Version => "2.0.0";
     public override string Link => "https://github.com/dexy/LiveLogStream";
 
     private static string MOD_NAME = "LiveLogStream";
