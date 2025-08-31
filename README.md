@@ -13,8 +13,8 @@ A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoade
 
 
 
-### Slot Structure
-![LiveLogStreamSlot](img/LiveLogStreamSlot.png)
+## Slot Structure
+
 ```
 UserRoot
 └── LiveLogStream
@@ -22,10 +22,10 @@ UserRoot
         |   VariableName: User/livelog_stream
         └── Reference: <ValueStream<string>>
 ```
+![LiveLogStreamSlot](img/LiveLogStreamSlot.png)
 
+## Accessing the Log Stream
 
-### Accessing the Log Stream
-![LiveLogSlot](img/LiveLogSlot.png)
 ```
 LiveLog
 ├── DynamicReferenceVariableDriver<IValue<string>>
@@ -34,3 +34,4 @@ LiveLog
 └── ValueDriver<string>
     └── ValueSource: → LiveLog Stream (ValueStream)
 ```
+![LiveLogSlot](img/LiveLogSlot.png)
