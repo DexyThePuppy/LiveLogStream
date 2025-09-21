@@ -39,20 +39,62 @@ public class LiveLogStreamHandler
     
     public void Setup()
     {
+        if (UserInstance?.Root?.Slot == null)
+        {
+            throw new InvalidOperationException("UserInstance.Root.Slot is null - cannot create LiveLog slot");
+        }
+
         HandlerDict.TryAdd(UserName, this);
         
-        // Create LiveLog slot
-        LiveLogSlot = UserInstance.Root?.Slot.FindChild("LiveLogStream") ?? UserInstance.Root?.Slot.AddSlot("LiveLogStream");
-        
-        SetupLogStream();
-        
-        Initialized = true;
+        try
+        {
+            // Create LiveLog slot
+            var existingSlot = UserInstance.Root.Slot.FindChild("LiveLogStream");
+            if (existingSlot != null)
+            {
+                LiveLogSlot = existingSlot;
+            }
+            else
+            {
+                LiveLogSlot = UserInstance.Root.Slot.AddSlot("LiveLogStream");
+                ResoniteMod.Msg($"Created LiveLogStream slot for {UserName}");
+            }
+            
+            if (LiveLogSlot == null)
+            {
+                throw new InvalidOperationException("Failed to create or find LiveLogStream slot");
+            }
+            
+            // Make slot visible and persistent
+            LiveLogSlot.PersistentSelf = true;
+            
+            SetupLogStream();
+            
+            if (LogStream == null)
+            {
+                throw new InvalidOperationException("LogStream is null after SetupLogStream");
+            }
+            
+            Initialized = true;
+        }
+        catch (Exception)
+        {
+            // Clean up on failure
+            Initialized = false;
+            LiveLogSlot?.Destroy();
+            LiveLogSlot = null;
+            LogStream?.Destroy();
+            LogStream = null;
+            HandlerDict.TryRemove(UserName, out _);
+            throw; // Re-throw to let caller handle
+        }
     }
     
     private void SetupLogStream()
     {
         // Create stream with proper naming pattern like Resonance - using a unique identifier
         var streamName = $"{UserInstance.ReferenceID}.livelog.{UserName}";
+        
         LogStream = UserInstance.GetStreamOrAdd<ValueStream<string>>(streamName, SetStreamParams);
         
         // Create reference variable in LiveLog slot
@@ -75,6 +117,12 @@ public class LiveLogStreamHandler
     {
         if (!Initialized)
             throw new LiveLogStreamNotInitializedException();
+
+        if (LogStream == null)
+            throw new InvalidOperationException("LogStream is null - handler may have been destroyed or not properly initialized");
+
+        if (string.IsNullOrEmpty(logMessage))
+            return; // Skip empty messages
             
         // Add to queue
         logQueue.Enqueue(logMessage);
@@ -85,9 +133,16 @@ public class LiveLogStreamHandler
         // Build the log content
         var logContent = string.Join("\n", logQueue.ToArray());
         
-        // Update stream value
-        LogStream.Value = logContent;
-        LogStream.ForceUpdate(); // Force update like Resonance does
+        try
+        {
+            // Update stream value
+            LogStream.Value = logContent;
+            LogStream.ForceUpdate(); // Force update like Resonance does
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to update LogStream: {ex.Message}", ex);
+        }
     }
     
     public void UpdateMaxLines(int newMaxLines)
@@ -98,24 +153,78 @@ public class LiveLogStreamHandler
     
     public void UpdateStreamPeriod(int newPeriod)
     {
-        if (Initialized)
+        if (Initialized && LogStream != null)
         {
-            LogStream.SetUpdatePeriod((uint)newPeriod, 0);
+            try
+            {
+                LogStream.SetUpdatePeriod((uint)newPeriod, 0);
+            }
+            catch (Exception ex)
+            {
+                ResoniteMod.Error($"Failed to update stream period for {UserName}: {ex.Message}");
+            }
         }
     }
     
     public void ClearLogs()
     {
         while (logQueue.TryDequeue(out _)) { }
-        LogStream.Value = "";
-        LogStream.ForceUpdate();
+        
+        if (LogStream != null)
+        {
+            try
+            {
+                LogStream.Value = "";
+                LogStream.ForceUpdate();
+            }
+            catch (Exception ex)
+            {
+                ResoniteMod.Error($"Failed to clear logs for {UserName}: {ex.Message}");
+            }
+        }
     }
     
     public void Destroy()
     {
         HandlerDict.TryRemove(UserName, out _);
-        LogStream?.Destroy();
-        LiveLogSlot?.Destroy();
+        
+        // Safely destroy LogStream - check if it's not disposed first
+        if (LogStream != null)
+        {
+            try
+            {
+                // Check if the stream is still valid before destroying
+                if (!LogStream.IsDestroyed && !LogStream.IsDisposed)
+                {
+                    LogStream.Destroy();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log the error but don't let it propagate - this is cleanup code
+                ResoniteMod.Msg($"[DEBUG] Error destroying LogStream for {UserName}: {ex.Message}");
+            }
+            LogStream = null;
+        }
+        
+        // Safely destroy LiveLogSlot
+        if (LiveLogSlot != null)
+        {
+            try
+            {
+                if (!LiveLogSlot.IsDestroyed && !LiveLogSlot.IsDisposed)
+                {
+                    LiveLogSlot.Destroy();
+                }
+            }
+            catch (Exception ex)
+            {
+                ResoniteMod.Msg($"[DEBUG] Error destroying LiveLogSlot for {UserName}: {ex.Message}");
+            }
+            LiveLogSlot = null;
+        }
+        
+        Initialized = false;
     }
     
     public static void Destroy(string userName)

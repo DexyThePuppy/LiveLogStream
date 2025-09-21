@@ -103,6 +103,10 @@ public class LiveLogMod : ResoniteMod
 
     private static Dictionary<ModConfigurationKey<string>, ModConfigurationKey<string>.OnChangedHandler> colorConfigHandlers = new();
     private static ModConfigurationKey<int>.OnChangedHandler maxLinesHandler = (value) => ResoniteMod.Msg($"Max lines changed to: {value}");
+    
+    // World change detection
+    private static World lastKnownWorld = null;
+    private static bool isCleaningUp = false;
 
 
 
@@ -122,13 +126,23 @@ public class LiveLogMod : ResoniteMod
     {
         if (!engineInitialized || Engine.Current?.WorldManager?.FocusedWorld == null) return;
 
+        // Skip processing if we're in cleanup mode to prevent infinite loops
+        if (isCleaningUp) return;
+
         var world = Engine.Current.WorldManager.FocusedWorld;
+        
+        // Check for world changes and clean up old handlers if needed
+        CheckAndHandleWorldChange(world);
+        
         var localUser = world.LocalUser;
         if (localUser == null) return;
 
         var userName = localUser.UserName;
         var userRoot = localUser.Root;
-        if (userRoot == null) return;
+        if (userRoot == null) 
+        {
+            return;
+        }
 
         // Format element descriptions if present
         var formattedText = LogFormatter.FormatElementDescription(text);
@@ -163,11 +177,78 @@ public class LiveLogMod : ResoniteMod
     {
         try
         {
+            // Validate input parameters
+            if (localUser == null)
+            {
+                ResoniteMod.Msg($"Failed to update ValueStream: localUser is null for {userName}");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(userName))
+            {
+                ResoniteMod.Msg("Failed to update ValueStream: userName is null or empty");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(logMessage))
+            {
+                ResoniteMod.Msg($"Failed to update ValueStream: logMessage is null or empty for {userName}");
+                return;
+            }
+
             // Check if handler already exists
             if (userLogHandlers.TryGetValue(userName, out var existingHandler))
             {
-                // Use existing handler
-                existingHandler.UpdateLog(logMessage);
+                // Validate existing handler before use
+                if (existingHandler == null)
+                {
+                    ResoniteMod.Msg($"Failed to update ValueStream: existingHandler is null for {userName}");
+                    userLogHandlers.TryRemove(userName, out _); // Clean up null handler
+                    return;
+                }
+
+                if (!existingHandler.Initialized)
+                {
+                    ResoniteMod.Msg($"Failed to update ValueStream: existingHandler not initialized for {userName}");
+                    return;
+                }
+
+                // Check if LogStream is still valid
+                if (existingHandler.LogStream == null || existingHandler.LogStream.IsDestroyed || existingHandler.LogStream.IsDisposed)
+                {
+                    ResoniteMod.Msg($"[DEBUG] LogStream is null/destroyed/disposed for {userName}, removing handler");
+                    existingHandler.Destroy();
+                    userLogHandlers.TryRemove(userName, out _);
+                    return;
+                }
+
+                // Check if UserInstance is still valid
+                if (existingHandler.UserInstance == null || existingHandler.UserInstance != localUser)
+                {
+                    ResoniteMod.Msg($"[DEBUG] UserInstance mismatch for {userName}, removing handler");
+                    existingHandler.Destroy();
+                    userLogHandlers.TryRemove(userName, out _);
+                    return;
+                }
+
+                try
+                {
+                    existingHandler.UpdateLog(logMessage);
+                }
+                catch (Exception updateEx)
+                {
+                    ResoniteMod.Msg($"Failed to update existing handler for {userName}: {updateEx.Message}");
+                    // Try to recreate handler on next call
+                    existingHandler.Destroy();
+                    userLogHandlers.TryRemove(userName, out _);
+                }
+                return;
+            }
+
+            // Validate localUser state before creating new handler
+            if (localUser.Root == null)
+            {
+                ResoniteMod.Msg($"Failed to update ValueStream: localUser.Root is null for {userName}");
                 return;
             }
 
@@ -184,6 +265,14 @@ public class LiveLogMod : ResoniteMod
                 newHandler.Destroy();
                 return; // Exit early to prevent the loop
             }
+
+            // Validate that setup was successful
+            if (!newHandler.Initialized || newHandler.LogStream == null)
+            {
+                ResoniteMod.Msg($"Failed to initialize LiveLogStreamHandler for {userName}: Handler or LogStream is null after setup");
+                newHandler.Destroy();
+                return;
+            }
             
             // Add to dictionary only after successful setup
             if (userLogHandlers.TryAdd(userName, newHandler))
@@ -195,7 +284,17 @@ public class LiveLogMod : ResoniteMod
                 // Another thread created a handler, use that one
                 if (userLogHandlers.TryGetValue(userName, out var handler))
                 {
-                    handler.UpdateLog(logMessage);
+                    if (handler != null && handler.Initialized && handler.LogStream != null)
+                    {
+                        try
+                        {
+                            handler.UpdateLog(logMessage);
+                        }
+                        catch (Exception concurrentUpdateEx)
+                        {
+                            ResoniteMod.Msg($"Failed to update concurrent handler for {userName}: {concurrentUpdateEx.Message}");
+                        }
+                    }
                 }
                 // Clean up the handler we created
                 newHandler.Destroy();
@@ -203,7 +302,17 @@ public class LiveLogMod : ResoniteMod
             }
 
             // Update log through handler
-            newHandler.UpdateLog(logMessage);
+            try
+            {
+                newHandler.UpdateLog(logMessage);
+            }
+            catch (Exception logUpdateEx)
+            {
+                ResoniteMod.Msg($"Failed to update log for new handler {userName}: {logUpdateEx.Message}");
+                newHandler.Destroy();
+                userLogHandlers.TryRemove(userName, out _);
+                return;
+            }
 
             // Initialize user if needed
             if (!initializedUsers.Contains(userName))
@@ -213,7 +322,9 @@ public class LiveLogMod : ResoniteMod
         }
         catch (Exception e)
         {
-            ResoniteMod.Msg($"Failed to update ValueStream: {e.Message}");
+            ResoniteMod.Msg($"Failed to update ValueStream for {userName}: {e.Message}");
+            // Log the full exception for debugging
+            ResoniteMod.Msg($"ValueStream Exception Details: {e}");
         }
     }
 
@@ -338,7 +449,98 @@ public class LiveLogMod : ResoniteMod
             engineInitialized = true;
             
             Msg("LiveLog mod initialized and ready!");
+            
+            // Try to create a handler immediately if user exists
+            TryCreateInitialHandler();
         };
+    }
+
+    private static void CheckAndHandleWorldChange(World currentWorld)
+    {
+        if (lastKnownWorld == currentWorld)
+        {
+            return; // No world change
+        }
+
+        if (lastKnownWorld != null)
+        {
+            ResoniteMod.Msg($"World change detected! Cleaning up LiveLog handlers from previous world");
+            
+            // Clear all handlers from the previous world
+            ClearAllHandlers();
+            
+            // Clear initialized users list
+            initializedUsers.Clear();
+        }
+
+        lastKnownWorld = currentWorld;
+        
+        if (currentWorld != null)
+        {
+            ResoniteMod.Msg($"LiveLog ready for new world: {currentWorld.Name ?? "Unnamed"}");
+        }
+    }
+
+    private static void ClearAllHandlers()
+    {
+        if (isCleaningUp) return; // Prevent recursive cleanup
+
+        try
+        {
+            isCleaningUp = true;
+            
+            var handlersToDestroy = new List<LiveLogStreamHandler>(userLogHandlers.Values);
+            userLogHandlers.Clear();
+
+            foreach (var handler in handlersToDestroy)
+            {
+                try
+                {
+                    handler.Destroy();
+                }
+                catch (Exception ex)
+                {
+                    ResoniteMod.Msg($"[DEBUG] Error destroying handler during world change: {ex.Message}");
+                }
+            }
+
+            ResoniteMod.Msg($"Cleaned up {handlersToDestroy.Count} LiveLog handlers");
+        }
+        catch (Exception e)
+        {
+            ResoniteMod.Msg($"[DEBUG] Failed to clear all handlers: {e.Message}");
+        }
+        finally
+        {
+            isCleaningUp = false;
+        }
+    }
+
+    private static void TryCreateInitialHandler()
+    {
+        try
+        {
+            if (Engine.Current?.WorldManager?.FocusedWorld?.LocalUser == null)
+            {
+                return;
+            }
+
+            var world = Engine.Current.WorldManager.FocusedWorld;
+            var localUser = world.LocalUser;
+            var userName = localUser.UserName;
+
+            if (localUser.Root == null)
+            {
+                return;
+            }
+            
+            // Process a test log to trigger handler creation
+            ProcessLog("[INFO] LiveLog mod ready", "INFO");
+        }
+        catch (Exception e)
+        {
+            ResoniteMod.Msg($"[DEBUG] Failed to create initial handler: {e.Message}");
+        }
     }
 
     private static void HandleConfigurationChanged(ConfigurationChangedEvent configEvent)
